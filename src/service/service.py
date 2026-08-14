@@ -12,7 +12,13 @@ from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core._api import LangChainBetaWarning
-from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langfuse import Langfuse  # type: ignore[import-untyped]
 from langfuse.langchain import (
@@ -33,16 +39,17 @@ from schema import (
     FeedbackResponse,
     ServiceMetadata,
     StreamInput,
-    ThreadSummary,
     UserInput,
     UserThreads,
     UserThreadsInput,
 )
 from service.agui import router as agui_router
+from service.threads import list_user_threads
 from service.utils import (
     convert_message_content_to_string,
     ensure_model_available,
     langchain_to_chat_message,
+    messages_from_checkpoint,
     remove_tool_calls,
 )
 
@@ -419,11 +426,19 @@ async def history(input: ChatHistoryInput, agent_id: str = DEFAULT_AGENT) -> Cha
     If agent_id is not provided, the default agent will be used.
     """
     agent: AgentGraph = get_agent(agent_id)
+    config = RunnableConfig(configurable={"thread_id": input.thread_id})
     try:
-        state_snapshot = await agent.aget_state(
-            config=RunnableConfig(configurable={"thread_id": input.thread_id})
-        )
-        messages: list[AnyMessage] = state_snapshot.values["messages"]
+        messages: list[BaseMessage] = []
+        # Functional-API agents keep the conversation in `__previous__`, which aget_state
+        # doesn't return, so read the raw checkpoint first and only fall back for graphs.
+        checkpointer = getattr(agent, "checkpointer", None)
+        if checkpointer:
+            tup = await checkpointer.aget_tuple(config)
+            if tup and "__previous__" in (tup.checkpoint.get("channel_values") or {}):
+                messages = messages_from_checkpoint(tup.checkpoint)
+        if not messages:
+            state_snapshot = await agent.aget_state(config=config)
+            messages = state_snapshot.values["messages"]
         chat_messages: list[ChatMessage] = [langchain_to_chat_message(m) for m in messages]
         return ChatHistory(messages=chat_messages)
     except Exception as e:
@@ -438,67 +453,24 @@ async def threads(
 ) -> UserThreads:
     """
     List a user's conversation threads for an agent, most recently updated first.
+
+    `user_id` is asserted by the caller and not checked against the credentials on the
+    request, so any holder of the bearer token can list any user's threads - the same
+    trust model as /history. Put your own authorization in front of this before end
+    users can reach it.
     """
     agent: AgentGraph = get_agent(agent_id)
     checkpointer = getattr(agent, "checkpointer", None)
     if not checkpointer:
         return UserThreads(threads=[])
 
-    seen_threads: dict[str, ThreadSummary] = {}
-    before = None
     try:
-        while len(seen_threads) < input.limit:
-            page = [
-                c
-                async for c in checkpointer.alist(
-                    None,
-                    filter={"user_id": input.user_id, "agent_id": agent_id},
-                    before=before,
-                    limit=200,
-                )
-            ]
-            if not page:
-                break
-            for tup in page:
-                tid = tup.config["configurable"]["thread_id"]
-                if tid in seen_threads:
-                    continue
-
-                stored_user_id = tup.metadata.get("user_id")
-                stored_agent_id = tup.metadata.get("agent_id")
-                if stored_user_id != input.user_id or (
-                    stored_agent_id is not None and stored_agent_id != agent_id
-                ):
-                    logger.warning(
-                        f"Checkpointer returned thread {tid} with user_id "
-                        f"{stored_user_id!r}/agent_id {stored_agent_id!r}, expected "
-                        f"{input.user_id!r}/{agent_id!r} — skipping to avoid a "
-                        "cross-user or cross-agent leak."
-                    )
-                    continue
-
-                messages = tup.checkpoint.get("channel_values", {}).get("messages", [])
-                first_human = next((m for m in messages if isinstance(m, HumanMessage)), None)
-                title = (
-                    convert_message_content_to_string(first_human.content)[:60]
-                    if first_human
-                    else None
-                )
-                seen_threads[tid] = ThreadSummary(
-                    thread_id=tid,
-                    agent_id=tup.metadata.get("agent_id", agent_id),
-                    updated_at=tup.checkpoint.get("ts"),
-                    title=title,
-                )
-            before = RunnableConfig(
-                configurable={"checkpoint_id": page[-1].config["configurable"]["checkpoint_id"]}
-            )
+        summaries = await list_user_threads(checkpointer, input.user_id, agent_id, input.limit)
     except Exception as e:
         logger.error(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
-    sorted_threads = sorted(seen_threads.values(), key=lambda t: t.updated_at, reverse=True)
-    return UserThreads(threads=sorted_threads[: input.limit])
+    return UserThreads(threads=summaries)
 
 
 @app.get("/health")
