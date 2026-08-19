@@ -2,10 +2,11 @@ from dataclasses import dataclass
 
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.pregel import Pregel
-from agents.device_assistant import device_assistant
+
 from agents.bg_task_agent.bg_task_agent import bg_task_agent
 from agents.chatbot import chatbot
 from agents.command_agent import command_agent
+from agents.device_assistant import device_assistant
 from agents.github_mcp_agent.github_mcp_agent import github_mcp_agent
 from agents.interrupt_agent import interrupt_agent
 from agents.knowledge_base_agent import kb_agent

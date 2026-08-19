@@ -21,6 +21,7 @@ from business.device.tool import (
 )
 from business.knowledge.tool import search_maintenance_knowledge
 from core import get_model, settings
+from tool_gateway import ToolGateway
 
 
 class AgentState(MessagesState, total=False):
@@ -33,7 +34,7 @@ class AgentState(MessagesState, total=False):
     remaining_steps: RemainingSteps
 
 
-tools = [
+raw_tools = [
     query_device,
     query_device_alarms,
     assess_alarm_risk,
@@ -44,6 +45,11 @@ tools = [
     start_work_order,
     complete_work_order_tool,
 ]
+
+# LangGraph receives only GatewayTool facades. The underlying business tools
+# remain unchanged and continue to own validation, HITL, and state transitions.
+tool_gateway = ToolGateway()
+tools = tool_gateway.wrap_many(raw_tools)
 
 instructions = """
 You are an enterprise device operation and maintenance assistant.
