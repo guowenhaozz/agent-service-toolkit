@@ -6,8 +6,11 @@ import sqlite3
 from typing import Annotated
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.errors import GraphInterrupt
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -498,7 +501,42 @@ async def test_command_return_value_and_tool_call_id_are_preserved():
 
     assert isinstance(command, Command)
     assert command.update == {"value": "kept"}
-    assert tool_call_id == "call-123"
+    assert isinstance(tool_call_id, ToolMessage)
+    assert tool_call_id.content == "call-123"
+    assert tool_call_id.tool_call_id == "call-123"
+
+
+@pytest.mark.asyncio
+async def test_tool_node_accepts_gateway_tool_output(tmp_path):
+    async def read(value: str) -> str:
+        return f"ok:{value}"
+
+    gateway = ToolGateway(
+        policies={"ToolNodeRead": make_policy("ToolNodeRead")},
+        recorder=TraceRecorder(tmp_path / "trace.jsonl"),
+    )
+    wrapped = gateway.wrap(make_async_tool("ToolNodeRead", read))
+    builder = StateGraph(MessagesState)
+    builder.add_node("tools", ToolNode([wrapped]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+    tool_call = {
+        "name": "ToolNodeRead",
+        "args": {"value": "node"},
+        "id": "tool-node-call",
+        "type": "tool_call",
+    }
+
+    with execution_context_scope(make_context()):
+        result = await graph.ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[tool_call])]},
+        )
+
+    message = result["messages"][-1]
+    assert isinstance(message, ToolMessage)
+    assert message.content == "ok:node"
+    assert message.tool_call_id == "tool-node-call"
 
 
 @pytest.mark.asyncio

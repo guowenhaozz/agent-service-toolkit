@@ -14,6 +14,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools.base import _format_output
 from langgraph.errors import GraphBubbleUp
 from pydantic import ConfigDict, Field, ValidationError
 
@@ -85,7 +86,7 @@ class GatewayTool(BaseTool):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Validate input and execute without altering Command results."""
+        """Validate input and execute while preserving ToolNode output types."""
 
         tool_input, tool_call_id = _split_tool_input(input, kwargs)
         try:
@@ -98,12 +99,13 @@ class GatewayTool(BaseTool):
             )
             raise
 
-        return await self.gateway.execute_async(
+        result = await self.gateway.execute_async(
             self,
             args=args,
             kwargs=parsed_kwargs,
             config=config,
         )
+        return _format_gateway_output(self, result, tool_call_id)
 
     def invoke(
         self,
@@ -124,12 +126,13 @@ class GatewayTool(BaseTool):
             )
             raise
 
-        return self.gateway.execute_sync(
+        result = self.gateway.execute_sync(
             self,
             args=args,
             kwargs=parsed_kwargs,
             config=config,
         )
+        return _format_gateway_output(self, result, tool_call_id)
 
     async def _arun(
         self,
@@ -668,6 +671,33 @@ def _split_tool_input(
     if isinstance(input, dict) and input.get("type") == "tool_call":
         return dict(input.get("args", {})), input.get("id")
     return input, kwargs.get("tool_call_id")
+
+
+def _format_gateway_output(
+    tool: GatewayTool,
+    result: Any,
+    tool_call_id: str | None,
+) -> Any:
+    """Mirror BaseTool output formatting for ToolNode and direct callers."""
+
+    artifact = None
+    content = result
+    if tool.response_format == "content_and_artifact":
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise ValueError(
+                "Since response_format='content_and_artifact' a two-tuple "
+                f"of the message content and raw tool output is expected. "
+                f"Instead, generated response is of type: {type(result)}."
+            )
+        content, artifact = result
+
+    return _format_output(
+        content,
+        artifact,
+        tool_call_id,
+        tool.name,
+        "success",
+    )
 
 
 def _normalize_for_hash(value: Any) -> Any:
