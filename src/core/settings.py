@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     PORT: int = 8080
     GRACEFUL_SHUTDOWN_TIMEOUT: int = 30
     LOG_LEVEL: LogLevel = LogLevel.WARNING
+    TRACE_ENABLED: bool = True
+    TRACE_LOG_PATH: str = "data/traces/agent_trace.jsonl"
 
     AUTH_SECRET: SecretStr | None = None
 
