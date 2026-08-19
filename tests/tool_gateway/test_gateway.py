@@ -3,18 +3,23 @@
 import asyncio
 import json
 import sqlite3
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
+from business.device import repository as device_repository
+from business.device.tool import query_device
 from core import settings
+from harness.agent_harness import AgentHarness
 from harness.context import ExecutionContext
 from harness.trace import TraceRecorder
 from tool_gateway import (
@@ -507,23 +512,26 @@ async def test_command_return_value_and_tool_call_id_are_preserved():
 
 
 @pytest.mark.asyncio
-async def test_tool_node_accepts_gateway_tool_output(tmp_path):
-    async def read(value: str) -> str:
-        return f"ok:{value}"
+async def test_tool_node_accepts_real_query_device_gateway_output(monkeypatch, tmp_path):
+    """Exercise the exact QueryDevice -> Gateway -> ToolNode call path."""
+
+    monkeypatch.setattr(device_repository, "DB_PATH", tmp_path / "business.db")
+    device_repository.initialize_device_table()
 
     gateway = ToolGateway(
-        policies={"ToolNodeRead": make_policy("ToolNodeRead")},
+        policies={"QueryDevice": make_policy("QueryDevice")},
         recorder=TraceRecorder(tmp_path / "trace.jsonl"),
     )
-    wrapped = gateway.wrap(make_async_tool("ToolNodeRead", read))
+    wrapped = gateway.wrap(query_device)
+    raw_result = await query_device.ainvoke({"device_id": "DVC-001"})
     builder = StateGraph(MessagesState)
     builder.add_node("tools", ToolNode([wrapped]))
     builder.add_edge(START, "tools")
     builder.add_edge("tools", END)
     graph = builder.compile()
     tool_call = {
-        "name": "ToolNodeRead",
-        "args": {"value": "node"},
+        "name": "QueryDevice",
+        "args": {"device_id": "DVC-001"},
         "id": "tool-node-call",
         "type": "tool_call",
     }
@@ -535,8 +543,106 @@ async def test_tool_node_accepts_gateway_tool_output(tmp_path):
 
     message = result["messages"][-1]
     assert isinstance(message, ToolMessage)
-    assert message.content == "ok:node"
+    assert message.content == raw_result
     assert message.tool_call_id == "tool-node-call"
+
+
+class FakeChatModel(BaseChatModel):
+    """Deterministic two-turn model for the compiled Agent integration test."""
+
+    _tool_call_emitted: bool = PrivateAttr(default=False)
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-device-chat-model"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "FakeChatModel":
+        return self
+
+    def _generate(
+        self,
+        messages: list[Any],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        if any(message.type == "tool" for message in messages):
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(content="已完成设备信息查询。"),
+                    )
+                ]
+            )
+
+        self._tool_call_emitted = True
+        return ChatResult(
+            generations=[
+                ChatGeneration(
+                    message=AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "QueryDevice",
+                                "args": {"device_id": "DVC-001"},
+                                "id": "fake-query-device-call",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                )
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_compiled_device_agent_completes_query_device_with_fake_chat_model(
+    monkeypatch,
+    tmp_path,
+):
+    """Run the compiled device Agent through model -> ToolNode -> model."""
+
+    import agents.device_assistant as device_assistant_module
+
+    monkeypatch.setattr(device_repository, "DB_PATH", tmp_path / "business.db")
+    device_repository.initialize_device_table()
+    fake_model = FakeChatModel()
+
+    class SafeGuardStub:
+        async def ainvoke(self, messages: list[Any]):
+            return device_assistant_module.SafeguardOutput(
+                safety_assessment=device_assistant_module.SafetyAssessment.SAFE
+            )
+
+    monkeypatch.setattr(device_assistant_module, "Safeguard", SafeGuardStub)
+    monkeypatch.setattr(device_assistant_module, "get_model", lambda *_: fake_model)
+
+    context = make_context().model_copy(update={"endpoint": "/stream"})
+    harness = AgentHarness(recorder=TraceRecorder(tmp_path / "run-trace.jsonl"))
+    monkeypatch.setattr(device_assistant_module.tool_gateway, "recorder", harness.recorder)
+    result = await harness.invoke(
+        device_assistant_module.device_assistant,
+        context,
+        input={"messages": [HumanMessage(content="查询设备 DVC-001 的详细信息。")]},
+        config={"configurable": {"model": "fake"}},
+    )
+
+    assert fake_model._tool_call_emitted is True
+    assert result["messages"][-1].content == "已完成设备信息查询。"
+    tool_messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].tool_call_id == "fake-query-device-call"
+    assert '"DVC-001"' in tool_messages[0].content
+
+    run_events = read_events(tmp_path / "run-trace.jsonl")
+    assert [event["event_type"] for event in run_events] == [
+        "RUN_STARTED",
+        "TOOL_STARTED",
+        "TOOL_COMPLETED",
+        "RUN_COMPLETED",
+    ]
+    assert {event["request_id"] for event in run_events} == {context.request_id}
+    assert run_events[2]["result_type"] == "str"
 
 
 @pytest.mark.asyncio

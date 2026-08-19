@@ -14,7 +14,6 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, ToolException
-from langchain_core.tools.base import _format_output
 from langgraph.errors import GraphBubbleUp
 from pydantic import ConfigDict, Field, ValidationError
 
@@ -80,17 +79,22 @@ class GatewayTool(BaseTool):
         }
         super().__init__(**values)
 
-    async def ainvoke(
+    async def arun(
         self,
-        input: str | dict[str, Any],
-        config: RunnableConfig | None = None,
+        tool_input: str | dict[str, Any],
+        *args: Any,
         **kwargs: Any,
     ) -> Any:
-        """Validate input and execute while preserving ToolNode output types."""
+        """Keep native BaseTool parsing and output formatting intact.
 
-        tool_input, tool_call_id = _split_tool_input(input, kwargs)
+        ``BaseTool.ainvoke`` delegates to ``arun``. We only observe input
+        validation failures here so the Gateway can emit its rejection trace;
+        the actual parsing, injected ``tool_call_id``, callbacks, and
+        ``ToolMessage`` conversion remain owned by LangChain.
+        """
+
         try:
-            args, parsed_kwargs = self._to_args_and_kwargs(tool_input, tool_call_id)
+            self._to_args_and_kwargs(tool_input, kwargs.get("tool_call_id"))
         except (TypeError, ValueError, ValidationError) as error:
             self.gateway.record_rejected(
                 self.policy,
@@ -98,26 +102,18 @@ class GatewayTool(BaseTool):
                 error_message="工具参数校验失败。",
             )
             raise
+        return await super().arun(tool_input, *args, **kwargs)
 
-        result = await self.gateway.execute_async(
-            self,
-            args=args,
-            kwargs=parsed_kwargs,
-            config=config,
-        )
-        return _format_gateway_output(self, result, tool_call_id)
-
-    def invoke(
+    def run(
         self,
-        input: str | dict[str, Any],
-        config: RunnableConfig | None = None,
+        tool_input: str | dict[str, Any],
+        *args: Any,
         **kwargs: Any,
     ) -> Any:
-        """Synchronous counterpart used by sync ToolNode callers."""
+        """Synchronous counterpart preserving BaseTool's native semantics."""
 
-        tool_input, tool_call_id = _split_tool_input(input, kwargs)
         try:
-            args, parsed_kwargs = self._to_args_and_kwargs(tool_input, tool_call_id)
+            self._to_args_and_kwargs(tool_input, kwargs.get("tool_call_id"))
         except (TypeError, ValueError, ValidationError) as error:
             self.gateway.record_rejected(
                 self.policy,
@@ -125,14 +121,7 @@ class GatewayTool(BaseTool):
                 error_message="工具参数校验失败。",
             )
             raise
-
-        result = self.gateway.execute_sync(
-            self,
-            args=args,
-            kwargs=parsed_kwargs,
-            config=config,
-        )
-        return _format_gateway_output(self, result, tool_call_id)
+        return super().run(tool_input, *args, **kwargs)
 
     async def _arun(
         self,
@@ -662,42 +651,6 @@ class ToolGateway:
                 "Unable to record tool lifecycle event: %s",
                 type(trace_error).__name__,
             )
-
-
-def _split_tool_input(
-    input: str | dict[str, Any],
-    kwargs: dict[str, Any],
-) -> tuple[str | dict[str, Any], str | None]:
-    if isinstance(input, dict) and input.get("type") == "tool_call":
-        return dict(input.get("args", {})), input.get("id")
-    return input, kwargs.get("tool_call_id")
-
-
-def _format_gateway_output(
-    tool: GatewayTool,
-    result: Any,
-    tool_call_id: str | None,
-) -> Any:
-    """Mirror BaseTool output formatting for ToolNode and direct callers."""
-
-    artifact = None
-    content = result
-    if tool.response_format == "content_and_artifact":
-        if not isinstance(result, tuple) or len(result) != 2:
-            raise ValueError(
-                "Since response_format='content_and_artifact' a two-tuple "
-                f"of the message content and raw tool output is expected. "
-                f"Instead, generated response is of type: {type(result)}."
-            )
-        content, artifact = result
-
-    return _format_output(
-        content,
-        artifact,
-        tool_call_id,
-        tool.name,
-        "success",
-    )
 
 
 def _normalize_for_hash(value: Any) -> Any:
