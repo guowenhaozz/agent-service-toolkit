@@ -9,6 +9,7 @@ from typing import Any
 from core import settings
 from harness.context import ExecutionContext
 from harness.trace import TraceRecorder, sanitize_error_message
+from tool_gateway.runtime import execution_context_scope
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,17 @@ class AgentHarness:
     ) -> Any:
         """Invoke an agent and re-raise every original exception."""
 
+        with execution_context_scope(context):
+            return await self._invoke_with_context(agent, context, **kwargs)
+
+    async def _invoke_with_context(
+        self,
+        agent: Any,
+        context: ExecutionContext,
+        **kwargs: Any,
+    ) -> Any:
+        """Run the invoke lifecycle while the ContextVars are bound."""
+
         started = time.perf_counter()
         self._record(
             context=context,
@@ -122,6 +134,18 @@ class AgentHarness:
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
         """Forward every stream chunk unchanged and record terminal state."""
+
+        with execution_context_scope(context):
+            async for chunk in self._stream_with_context(agent, context, **kwargs):
+                yield chunk
+
+    async def _stream_with_context(
+        self,
+        agent: Any,
+        context: ExecutionContext,
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
+        """Run the stream lifecycle while the ContextVars are bound."""
 
         started = time.perf_counter()
         self._record(

@@ -43,6 +43,11 @@ class TraceEvent(BaseModel):
     result_type: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    tool_name: str | None = None
+    operation_type: str | None = None
+    attempt: int | None = None
+    max_attempts: int | None = None
+    idempotency_key_hash: str | None = None
 
     @classmethod
     def create(
@@ -55,6 +60,11 @@ class TraceEvent(BaseModel):
         result_type: str | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
+        tool_name: str | None = None,
+        operation_type: str | None = None,
+        attempt: int | None = None,
+        max_attempts: int | None = None,
+        idempotency_key_hash: str | None = None,
     ) -> "TraceEvent":
         """Build an event using the context's stable request identifiers."""
 
@@ -72,6 +82,11 @@ class TraceEvent(BaseModel):
             result_type=result_type,
             error_type=error_type,
             error_message=error_message,
+            tool_name=tool_name,
+            operation_type=operation_type,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            idempotency_key_hash=idempotency_key_hash,
         )
 
 
@@ -165,6 +180,11 @@ class TraceRecorder:
         result_type: str | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
+        tool_name: str | None = None,
+        operation_type: str | None = None,
+        attempt: int | None = None,
+        max_attempts: int | None = None,
+        idempotency_key_hash: str | None = None,
     ) -> TraceEvent:
         """Create and persist an event, returning it for tests/callers."""
 
@@ -176,6 +196,11 @@ class TraceRecorder:
             result_type=result_type,
             error_type=error_type,
             error_message=error_message,
+            tool_name=tool_name,
+            operation_type=operation_type,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            idempotency_key_hash=idempotency_key_hash,
         )
         self.record(event)
         return event
