@@ -183,6 +183,15 @@ cython_debug/
 *.sqlite3
 *.bin
 
+# Agent Harness traces
+data/traces/*.jsonl
+
+# Local embedding model bundle; download it separately when needed.
+data/models/bge-small-zh-v1.5/
+
+# Local startup commands may contain development credentials.
+Start.txt
+
 # Private Credentials, ignore everything in the folder but the .gitkeep file
 privatecredentials/*
 !privatecredentials/.gitkeep

@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import logging
@@ -7,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -30,6 +31,7 @@ from langsmith import uuid7
 
 from agents import DEFAULT_AGENT, AgentGraph, get_agent, get_all_agent_info, load_agent
 from core import settings
+from harness import AgentHarness, ExecutionContext
 from memory import initialize_database, initialize_store
 from schema import (
     ChatHistory,
@@ -55,6 +57,7 @@ from service.utils import (
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
+agent_harness = AgentHarness()
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
@@ -137,15 +140,24 @@ async def info() -> ServiceMetadata:
 
 
 async def _handle_input(
-    user_input: UserInput, agent: AgentGraph, agent_id: str
-) -> tuple[dict[str, Any], UUID]:
+    user_input: UserInput,
+    agent: AgentGraph,
+    agent_id: str,
+    endpoint: str,
+) -> tuple[dict[str, Any], UUID, ExecutionContext]:
     """
     Parse user input and handle any required interrupt resumption.
-    Returns kwargs for agent invocation and the run_id.
+    Returns invocation kwargs, the run_id, and the immutable execution context.
     """
     run_id = uuid7()
     thread_id = user_input.thread_id or str(uuid4())
     user_id = user_input.user_id or str(uuid4())
+    context = agent_harness.create_context(
+        user_id=user_id,
+        thread_id=thread_id,
+        agent_name=agent_id,
+        endpoint=endpoint,
+    )
 
     configurable = {"thread_id": thread_id, "user_id": user_id}
     if user_input.model is not None:
@@ -195,12 +207,16 @@ async def _handle_input(
         "config": config,
     }
 
-    return kwargs, run_id
+    return kwargs, run_id, context
 
 
 @router.post("/{agent_id}/invoke", operation_id="invoke_with_agent_id")
 @router.post("/invoke")
-async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMessage:
+async def invoke(
+    user_input: UserInput,
+    response: Response,
+    agent_id: str = DEFAULT_AGENT,
+) -> ChatMessage:
     """
     Invoke an agent with user input to retrieve a final response.
 
@@ -215,21 +231,27 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
     # you'd want to include it. You could update the API to return a list of ChatMessages
     # in that case.
     agent: AgentGraph = get_agent(agent_id)
-    kwargs, run_id = await _handle_input(user_input, agent, agent_id)
+    kwargs, run_id, context = await _handle_input(user_input, agent, agent_id, "/invoke")
+    response.headers["X-Request-ID"] = context.request_id
 
     try:
-        response_events: list[tuple[str, Any]] = await agent.ainvoke(**kwargs, stream_mode=["updates", "values"])  # type: ignore # fmt: skip
-        response_type, response = response_events[-1]
+        response_events: list[tuple[str, Any]] = await agent_harness.invoke(
+            agent,
+            context=context,
+            **kwargs,
+            stream_mode=["updates", "values"],
+        )  # type: ignore # fmt: skip
+        response_type, response_data = response_events[-1]
         # A run that stops on an interrupt reports it on the final event of either stream
         # mode, so check for the interrupt before falling back to the last message.
-        if "__interrupt__" in response:
+        if "__interrupt__" in response_data:
             # Return the value of the first interrupt as an AIMessage
             output = langchain_to_chat_message(
-                AIMessage(content=response["__interrupt__"][0].value)
+                AIMessage(content=response_data["__interrupt__"][0].value)
             )
         elif response_type == "values":
             # Normal response, the agent completed successfully
-            output = langchain_to_chat_message(response["messages"][-1])
+            output = langchain_to_chat_message(response_data["messages"][-1])
         else:
             raise ValueError(f"Unexpected response type: {response_type}")
 
@@ -249,12 +271,17 @@ async def message_generator(
     This is the workhorse method for the /stream endpoint.
     """
     agent: AgentGraph = get_agent(agent_id)
-    kwargs, run_id = await _handle_input(user_input, agent, agent_id)
+    kwargs, run_id, context = await _handle_input(user_input, agent, agent_id, "/stream")
 
+    cancelled = False
     try:
         # Process streamed events from the graph and yield messages over the SSE stream.
-        async for stream_event in agent.astream(  # type: ignore[no-matching-overload]
-            **kwargs, stream_mode=["updates", "messages", "custom"], subgraphs=True
+        async for stream_event in agent_harness.stream(
+            agent,
+            context=context,
+            **kwargs,
+            stream_mode=["updates", "messages", "custom"],
+            subgraphs=True,
         ):
             if not isinstance(stream_event, tuple):
                 continue
@@ -346,11 +373,15 @@ async def message_generator(
                     # that the model is asking for a tool to be invoked.
                     # So we only print non-empty content.
                     yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except Exception as e:
         logger.error(f"Error in message generator: {e}")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'})}\n\n"
     finally:
-        yield "data: [DONE]\n\n"
+        if not cancelled:
+            yield "data: [DONE]\n\n"
 
 
 def _create_ai_message(parts: dict) -> AIMessage:

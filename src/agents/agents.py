@@ -6,6 +6,7 @@ from langgraph.pregel import Pregel
 from agents.bg_task_agent.bg_task_agent import bg_task_agent
 from agents.chatbot import chatbot
 from agents.command_agent import command_agent
+from agents.device_assistant import device_assistant
 from agents.github_mcp_agent.github_mcp_agent import github_mcp_agent
 from agents.interrupt_agent import interrupt_agent
 from agents.knowledge_base_agent import kb_agent
@@ -18,11 +19,13 @@ from schema import AgentInfo
 
 DEFAULT_AGENT = "research-assistant"
 
+
 # Type alias to handle LangGraph's different agent patterns
 # - @entrypoint functions return Pregel
 # - StateGraph().compile() returns CompiledStateGraph
 AgentGraph = CompiledStateGraph | Pregel  # What get_agent() returns (always loaded)
 AgentGraphLike = CompiledStateGraph | Pregel | LazyLoadingAgent  # What can be stored in registry
+
 
 
 @dataclass
@@ -36,6 +39,10 @@ agents: dict[str, Agent] = {
     "research-assistant": Agent(
         description="A research assistant with web search and calculator.",
         graph_like=research_assistant,
+    ),
+    "device-assistant": Agent(
+    description="An enterprise device operation and maintenance assistant.",
+    graph_like=device_assistant,
     ),
     "rag-assistant": Agent(
         description="A RAG assistant with access to information in a database.",

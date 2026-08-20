@@ -12,6 +12,7 @@ from langgraph.prebuilt import ToolNode
 
 from agents.safeguard import Safeguard, SafeguardOutput, SafetyAssessment
 from agents.tools import calculator
+from business.device.tool import query_device
 from core import get_model, settings
 
 
@@ -26,7 +27,7 @@ class AgentState(MessagesState, total=False):
 
 
 web_search = DuckDuckGoSearchResults(name="WebSearch")
-tools = [web_search, calculator]
+tools = [web_search, calculator, query_device]
 
 # Add weather tool if API key is set
 # Register for an API key at https://openweathermap.org/api/
@@ -47,7 +48,9 @@ instructions = f"""
     - Please include markdown-formatted links to any citations used in your response. Only include one
     or two citations per response unless more are needed. ONLY USE LINKS RETURNED BY THE TOOLS.
     - Use calculator tool with numexpr to answer math questions. The user does not understand numexpr,
-      so for the final response, use human readable format - e.g. "300 * 200", not "(300 \\times 200)".
+      so for the final response, use huan readable format - e.g. "300 * 200", not "(300 \\times 200)".
+    - When the user asks about device information, status, or location,always use the QueryDevice tool.
+      Never fabricate device data.
     """
 
 
